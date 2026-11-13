@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 
 import 'annotation_ui.dart';
 import 'annotations.dart';
+import 'chapters.dart';
 import 'models.dart';
 import 'palette.dart';
 import 'state.dart';
@@ -138,6 +139,8 @@ class _ReaderPageState extends State<ReaderPage> {
         const SnackBar(content: Text('本卷经文已复制到剪贴板'), duration: Duration(seconds: 2)));
   }
 
+  int? _lastTab;
+
   @override
   Widget build(BuildContext context) {
     final st = AppScope.of(context);
@@ -149,11 +152,20 @@ class _ReaderPageState extends State<ReaderPage> {
 
     if (_loadedKey != s.key) {
       _loadedKey = s.key;
+      _lastTab = st.tab;
       _paraKeys.clear();
       _clearSelection();
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (_scroll.hasClients) _scroll.jumpTo(0);
       });
+    } else if (_lastTab != st.tab) {
+      _lastTab = st.tab;
+      // 切标签时回到顶部；若有待定位的段落则交给 _focusPara 处理
+      if (st.jumpPara == null) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (_scroll.hasClients) _scroll.jumpTo(0);
+        });
+      }
     }
     final token = '${s.key}/${st.jumpPara}/${st.jumpSeq}/${st.jumpAnnotationId}';
     if (st.jumpPara != null && token != _jumpToken) {
@@ -161,25 +173,25 @@ class _ReaderPageState extends State<ReaderPage> {
       WidgetsBinding.instance.addPostFrameCallback((_) => _focusPara(st.jumpPara!));
     }
 
+    // 单一 CustomScrollView：经题、标签、正文同处一条滚动轴，
+    // 避免「固定高度内嵌列表」造成的嵌套滚动与回溯卡顿。
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
         Expanded(
-          child: ListView(
-            key: PageStorageKey<String>('reader_${s.key}_${st.tab}'),
-            padding: const EdgeInsets.fromLTRB(24, 20, 24, 16),
-            children: <Widget>[
-              _Hero(s: s, st: st, p: p),
-              const SizedBox(height: 16),
-              _Tabs(s: s, st: st, p: p),
-              const SizedBox(height: 14),
-              if (st.tab == 0)
-                _OutlineView(s: s, p: p)
-              else if (st.tab == 2)
-                _NotesView(s: s, p: p)
-              else
-                _inlineText(s, st, p),
-            ],
+          child: Container(
+            decoration: BoxDecoration(
+              color: p.paper,
+              border: Border(bottom: BorderSide(color: p.line)),
+            ),
+            child: CustomScrollView(
+              key: PageStorageKey<String>('reader_${s.key}_${st.tab}'),
+              controller: _scroll,
+              // 向上回溯时预建更多段落：SelectableText 构建较重，
+              // 加大缓存区可让回滚时直接复用已建好的段落，明显减少掉帧。
+              cacheExtent: 1600,
+              slivers: _slivers(s, st, p),
+            ),
           ),
         ),
         _Pager(st: st, p: p),
@@ -187,61 +199,69 @@ class _ReaderPageState extends State<ReaderPage> {
     );
   }
 
-  /// 原文视图内嵌在外层 ListView 里：用固定高度的子列表，避免嵌套滚动冲突。
-  Widget _inlineText(Sutra s, AppState st, Palette p) {
+  List<Widget> _slivers(Sutra s, AppState st, Palette p) {
+    final head = <Widget>[
+      _Hero(s: s, st: st, p: p),
+      const SizedBox(height: 16),
+      _Tabs(s: s, st: st, p: p),
+      const SizedBox(height: 14),
+    ];
+    if (st.tab == 0) {
+      head.add(_OutlineView(s: s, p: p));
+    } else if (st.tab == 2) {
+      head.add(_NotesView(s: s, p: p));
+    } else {
+      head.add(_TextTools(
+        st: st,
+        p: p,
+        s: s,
+        preface: s.text.paras.where((x) => x.isPreface).length,
+        selectedLen: _selectedLen,
+        onAnnotate: () => _annotate(s, p),
+        onCopy: () => _copyVolume(s),
+      ));
+      head.add(const SizedBox(height: 8));
+    }
+
     final paras = s.text.paras;
-    final preface = paras.where((x) => x.isPreface).length;
-    final height = (MediaQuery.of(context).size.height - 300).clamp(320.0, 900.0);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: <Widget>[
-        _TextTools(
-          st: st,
-          p: p,
-          s: s,
-          preface: preface,
-          selectedLen: _selectedLen,
-          onAnnotate: () => _annotate(s, p),
-          onCopy: () => _copyVolume(s),
-        ),
-        const SizedBox(height: 8),
-        Container(
-          height: height,
-          decoration: BoxDecoration(
-            color: p.paper,
-            border: Border.all(color: p.line),
-            borderRadius: BorderRadius.circular(3),
+    return <Widget>[
+      SliverPadding(
+        padding: const EdgeInsets.fromLTRB(24, 20, 24, 0),
+        sliver: SliverList(delegate: SliverChildListDelegate(head)),
+      ),
+      if (st.tab == 1)
+        SliverPadding(
+          padding: const EdgeInsets.fromLTRB(24, 0, 24, 96),
+          sliver: SliverList(
+            delegate: SliverChildBuilderDelegate(
+              (context, i) {
+                final para = paras[i];
+                if (para.isPreface && !st.showPreface) {
+                  return const SizedBox.shrink();
+                }
+                return Container(
+                  key: _keyFor(i),
+                  margin: EdgeInsets.only(bottom: para.k == 'p' ? 13 : 9),
+                  child: AnnotatedParagraph(
+                    text: para.v,
+                    kind: para.k,
+                    fontSize: st.fontSize,
+                    palette: p,
+                    marks: st.marksFor(s.key, i),
+                    onSelection: (sel) => _onSelection(i, sel),
+                    onAnnotate: (sel) =>
+                        _annotate(s, p, paraIndex: i, selection: sel),
+                    onTapMarks: (marks) => _tapMarks(marks, p),
+                  ),
+                );
+              },
+              childCount: paras.length,
+            ),
           ),
-          child: ListView.builder(
-            key: PageStorageKey<String>('text_${s.key}'),
-            controller: _scroll,
-            padding: const EdgeInsets.fromLTRB(20, 18, 20, 60),
-            itemCount: paras.length,
-            itemBuilder: (context, i) {
-              final para = paras[i];
-              if (para.isPreface && !st.showPreface) {
-                return const SizedBox.shrink();
-              }
-              return Container(
-                key: _keyFor(i),
-                margin: EdgeInsets.only(bottom: para.k == 'p' ? 12 : 8),
-                child: AnnotatedParagraph(
-                  text: para.v,
-                  kind: para.k,
-                  fontSize: st.fontSize,
-                  palette: p,
-                  marks: st.marksFor(s.key, i),
-                  onSelection: (sel) => _onSelection(i, sel),
-                  onAnnotate: (sel) =>
-                      _annotate(s, p, paraIndex: i, selection: sel),
-                  onTapMarks: (marks) => _tapMarks(marks, p),
-                ),
-              );
-            },
-          ),
-        ),
-      ],
-    );
+        )
+      else
+        const SliverToBoxAdapter(child: SizedBox(height: 32)),
+    ];
   }
 }
 
@@ -260,7 +280,7 @@ class _Hero extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.fromLTRB(22, 20, 22, 18),
       decoration: BoxDecoration(
-        color: p.paper,
+        color: p.card,
         border: Border.all(color: p.line),
         borderRadius: BorderRadius.circular(3),
       ),
@@ -367,8 +387,9 @@ class _Tabs extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final structCount = structureHeadings(s).length;
     final labels = <String>[
-      '大纲 ${s.outline.length}',
+      '大纲 ${s.outline.length + structCount}',
       '原文 ${s.text.paras.length}',
       '导读与版本',
     ];
@@ -463,21 +484,6 @@ class _OutlineViewState extends State<_OutlineView> {
   final Set<int> _expanded = {};
   bool _allExpanded = false;
 
-  /// 由经文的「品／卷」标题（k=='h'）自动生成的目录，锚点精确对应到该段。
-  List<(String, int)> get _headings {
-    final out = <(String, int)>[];
-    final seen = <String>{};
-    final paras = widget.s.text.paras;
-    for (int i = 0; i < paras.length; i++) {
-      final para = paras[i];
-      if (para.k == 'h' && para.v != widget.s.name && !seen.contains(para.v)) {
-        seen.add(para.v);
-        out.add((para.v, i));
-      }
-    }
-    return out;
-  }
-
   /// 为科判条目找一个可定位的段落：优先用标题/描述里的关键词在正文命中，
   /// 找不到则按序号把整卷均分，保证点击一定能跳到大致位置。
   int _anchor(OutlineItem o, int index, int count) {
@@ -506,12 +512,13 @@ class _OutlineViewState extends State<_OutlineView> {
   Widget build(BuildContext context) {
     final s = widget.s;
     final p = widget.p;
-    final headings = _headings;
+    final structure = structureHeadings(s);
+    final curated = hasCuratedChapters(s.key);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
         Text(
-            '科判大纲按经文次第梳理脉络，点标题可展开/折叠说明，点「原文」直接定位到对应段落；「本文结构」取自经文品目，同样可点击跳转。',
+            '科判大纲按经文次第梳理义理脉络，点标题可展开/折叠说明，点「原文」直接定位到对应段落；下方分品目录取自经文品目或传统分章，同样可点击跳转。',
             style: TextStyle(fontSize: 12, color: p.faint, height: 1.7)),
         const SizedBox(height: 12),
         Row(children: <Widget>[
@@ -537,7 +544,7 @@ class _OutlineViewState extends State<_OutlineView> {
           return Container(
             margin: const EdgeInsets.only(bottom: 9),
             decoration: BoxDecoration(
-              color: p.paper,
+              color: p.card,
               border: Border.all(color: p.line),
               borderRadius: BorderRadius.circular(3),
             ),
@@ -596,16 +603,30 @@ class _OutlineViewState extends State<_OutlineView> {
             ),
           );
         }),
-        if (headings.isNotEmpty) ...<Widget>[
+        if (structure.isNotEmpty) ...<Widget>[
           const SizedBox(height: 18),
-          Text('本文结构（品目 · 共 ${headings.length}）',
+          Text(
+              curated
+                  ? '分章目录 · 共 ${structure.length} 章'
+                  : '本文结构（品目 · 共 ${structure.length}）',
               style: kaiStyle.copyWith(fontSize: 15, color: p.ink)),
           const SizedBox(height: 4),
-          Text('经文自带的品、卷标题，点击直达该段。',
+          Text(
+              curated
+                  ? '${kChapterSource[s.key] ?? '依传统分科'}，点击直达该段。'
+                  : '经文自带的品、卷标题，点击直达该段。',
               style: TextStyle(fontSize: 11, color: p.faint, height: 1.6)),
           const SizedBox(height: 10),
-          ...headings.map(
-              (h) => _HeadingRow(title: h.$1, index: h.$2, p: p, onJump: () => _jump(h.$2))),
+          ...structure.map((h) => _HeadingRow(
+                title: h.title,
+                index: h.para,
+                p: p,
+                onJump: h.para >= 0 ? () => _jump(h.para) : null,
+              )),
+        ] else ...<Widget>[
+          const SizedBox(height: 16),
+          Text('本经在藏经底本中未分品目，以上科判即其通行的义理结构。',
+              style: TextStyle(fontSize: 11.5, color: p.faint, height: 1.7)),
         ],
       ],
     );
@@ -616,9 +637,9 @@ class _HeadingRow extends StatelessWidget {
   final String title;
   final int index;
   final Palette p;
-  final VoidCallback onJump;
+  final VoidCallback? onJump;
   const _HeadingRow(
-      {required this.title, required this.index, required this.p, required this.onJump});
+      {required this.title, required this.index, required this.p, this.onJump});
 
   @override
   Widget build(BuildContext context) => Container(
@@ -638,11 +659,13 @@ class _HeadingRow extends StatelessWidget {
                     child: Text(title,
                         style:
                             TextStyle(fontSize: 13.5, color: p.ink, height: 1.5))),
-                const SizedBox(width: 6),
-                Text('段落 ${index + 1}',
-                    style: TextStyle(fontSize: 10, color: p.faint)),
-                const SizedBox(width: 4),
-                Icon(Icons.chevron_right, size: 16, color: p.faint),
+                if (index >= 0) ...<Widget>[
+                  const SizedBox(width: 6),
+                  Text('段落 ${index + 1}',
+                      style: TextStyle(fontSize: 10, color: p.faint)),
+                  const SizedBox(width: 4),
+                  Icon(Icons.chevron_right, size: 16, color: p.faint),
+                ],
               ]),
             ),
           ),
@@ -672,7 +695,7 @@ class _NotesView extends StatelessWidget {
       Container(
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
-            color: p.paper, border: Border.all(color: p.line), borderRadius: BorderRadius.circular(3)),
+            color: p.card, border: Border.all(color: p.line), borderRadius: BorderRadius.circular(3)),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: <Widget>[
           Text('导读', style: kaiStyle.copyWith(fontSize: 17, color: p.ink)),
           const SizedBox(height: 10),
@@ -833,12 +856,53 @@ class AnnotatedParagraph extends StatefulWidget {
 class _AnnotatedParagraphState extends State<AnnotatedParagraph> {
   final List<TapGestureRecognizer> _recognizers = <TapGestureRecognizer>[];
 
+  // 缓存已构建的富文本与手势识别器：滚动导致的重建直接复用，
+  // 不再每次重建都重跑 splitSegments、重建 TapGestureRecognizer。
+  TextSpan? _cached;
+  String? _cachedText;
+  String? _cachedKind;
+  double? _cachedFont;
+  bool? _cachedNight;
+  List<Annotation> _cachedMarks = const <Annotation>[];
+
   @override
   void dispose() {
     for (final r in _recognizers) {
       r.dispose();
     }
     super.dispose();
+  }
+
+  static bool _sameMarks(List<Annotation> a, List<Annotation> b) {
+    if (a.length != b.length) return false;
+    for (int i = 0; i < a.length; i++) {
+      if (identical(a[i], b[i])) continue;
+      if (a[i].id != b[i].id ||
+          a[i].start != b[i].start ||
+          a[i].end != b[i].end ||
+          a[i].color != b[i].color) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  TextSpan _ensureSpan() {
+    final fresh = _cached != null &&
+        _cachedText == widget.text &&
+        _cachedKind == widget.kind &&
+        _cachedFont == widget.fontSize &&
+        _cachedNight == widget.palette.night &&
+        _sameMarks(_cachedMarks, widget.marks);
+    if (fresh) return _cached!;
+    final span = _buildSpan();
+    _cached = span;
+    _cachedText = widget.text;
+    _cachedKind = widget.kind;
+    _cachedFont = widget.fontSize;
+    _cachedNight = widget.palette.night;
+    _cachedMarks = List<Annotation>.of(widget.marks);
+    return span;
   }
 
   TextStyle _baseStyle(Palette p) {
@@ -894,7 +958,7 @@ class _AnnotatedParagraphState extends State<AnnotatedParagraph> {
   Widget build(BuildContext context) {
     final p = widget.palette;
     final style = _baseStyle(p);
-    final span = _buildSpan();
+    final span = _ensureSpan();
 
     return SelectableText.rich(
       span,

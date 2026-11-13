@@ -1,7 +1,7 @@
 name: sutra_flutter
 description: 五十经藏 · 五十部经典佛经大纲、原文与文字标注
 publish_to: 'none'
-version: 1.0.1+1
+version: 1.0.2+2
 
 environment:
   sdk: '>=3.3.0 <4.0.0'

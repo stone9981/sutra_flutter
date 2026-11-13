@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sutra_flutter/models.dart';
-import 'package:sutra_flutter/palette.dart';
 import 'package:sutra_flutter/reader.dart';
 import 'package:sutra_flutter/state.dart';
 
