@@ -104,6 +104,14 @@ class HomePage extends StatelessWidget {
 
     final wide = MediaQuery.of(context).size.width >= 880;
 
+    // 沉浸式全屏：撤掉应用顶栏、目录侧栏与安全区内边距，阅读区铺满整屏。
+    if (st.fullScreen) {
+      return Scaffold(
+        backgroundColor: p.paper,
+        body: const ReaderPage(),
+      );
+    }
+
     return Scaffold(
       backgroundColor: p.bg,
       appBar: AppBar(
@@ -129,6 +137,11 @@ class HomePage extends StatelessWidget {
           ]),
         ]),
         actions: <Widget>[
+          IconButton(
+            tooltip: '全屏阅读',
+            icon: const Icon(Icons.fullscreen, size: 20),
+            onPressed: () => st.enterFullScreen(),
+          ),
           IconButton(
             tooltip: '检索',
             icon: const Icon(Icons.search, size: 20),

@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -25,6 +26,10 @@ class AppState extends ChangeNotifier {
   bool showPreface = false;
   int currentIndex = 0;
   int tab = 0; // 0 大纲 / 1 原文 / 2 导读
+
+  /// 沉浸全屏：隐藏经题卡、标签、工具条、翻经栏，让经文铺满屏幕。
+  bool fullScreen = false;
+
   String query = '';
   String filter = 'all'; // all / fav
 
@@ -107,6 +112,31 @@ class AppState extends ChangeNotifier {
   void setTab(int v) {
     tab = v;
     notifyListeners();
+  }
+
+  void setFullScreen(bool v) {
+    if (fullScreen == v) return;
+    fullScreen = v;
+    _applySystemUI();
+    notifyListeners();
+  }
+
+  /// 进入沉浸式阅读：强制切到「原文」页并铺满屏幕。
+  void enterFullScreen() {
+    final changed = !fullScreen || tab != 1;
+    fullScreen = true;
+    tab = 1;
+    if (!changed) return;
+    _applySystemUI();
+    notifyListeners();
+  }
+
+  void _applySystemUI() {
+    // 进入全屏隐藏系统状态/导航栏，退出时恢复 edge-to-edge（保留手势区）。
+    SystemChrome.setEnabledSystemUIMode(
+      fullScreen ? SystemUiMode.immersiveSticky : SystemUiMode.edgeToEdge,
+      overlays: fullScreen ? <SystemUiOverlay>[] : SystemUiOverlay.values,
+    );
   }
 
   bool isFav(String key) => favorites.contains(key);

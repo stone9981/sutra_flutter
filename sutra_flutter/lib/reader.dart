@@ -175,27 +175,129 @@ class _ReaderPageState extends State<ReaderPage> {
 
     // 单一 CustomScrollView：经题、标签、正文同处一条滚动轴，
     // 避免「固定高度内嵌列表」造成的嵌套滚动与回溯卡顿。
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+    final body = st.fullScreen && st.tab == 1
+        ? _fullScreenView(s, st, p)
+        : Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: <Widget>[
+              Expanded(
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: p.paper,
+                    border: Border(bottom: BorderSide(color: p.line)),
+                  ),
+                  child: CustomScrollView(
+                    key: PageStorageKey<String>('reader_${s.key}_${st.tab}'),
+                    controller: _scroll,
+                    // 段落带 KeepAlive，回滚时直接复用已建好的段落；
+                    // 缓存区保持适中，避免同时布局过多重型 SelectableText。
+                    cacheExtent: 800,
+                    slivers: _slivers(s, st, p),
+                  ),
+                ),
+              ),
+              _Pager(st: st, p: p),
+            ],
+          );
+
+    // 全屏时系统返回键先退出全屏，而不是直接离开经藏。
+    return PopScope(
+      canPop: !st.fullScreen,
+      onPopInvoked: (didPop) {
+        if (!didPop && st.fullScreen) st.setFullScreen(false);
+      },
+      child: body,
+    );
+  }
+
+  /// 沉浸式全屏：只有经文铺满屏幕，顶部保留经名与一个退出按钮。
+  Widget _fullScreenView(Sutra s, AppState st, Palette p) {
+    final marks = _marksByPara(st, s.key);
+    final width = MediaQuery.of(context).size.width;
+    final side = width > 860 ? (width - 760) / 2 : 22.0;
+    return Stack(
+      fit: StackFit.expand,
       children: <Widget>[
-        Expanded(
-          child: Container(
-            decoration: BoxDecoration(
-              color: p.paper,
-              border: Border(bottom: BorderSide(color: p.line)),
-            ),
-            child: CustomScrollView(
-              key: PageStorageKey<String>('reader_${s.key}_${st.tab}'),
-              controller: _scroll,
-              // 向上回溯时预建更多段落：SelectableText 构建较重，
-              // 加大缓存区可让回滚时直接复用已建好的段落，明显减少掉帧。
-              cacheExtent: 1600,
-              slivers: _slivers(s, st, p),
+        Container(
+          color: p.paper,
+          child: CustomScrollView(
+            key: PageStorageKey<String>('reader_fs_${s.key}'),
+            controller: _scroll,
+            cacheExtent: 800,
+            slivers: <Widget>[
+              SliverPadding(
+                padding: EdgeInsets.fromLTRB(side, 62, side, 120),
+                sliver: SliverList(
+                  delegate: SliverChildBuilderDelegate(
+                    (context, i) => _paraRow(s, st, i, marks),
+                    childCount: s.text.paras.length,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        Positioned(
+          top: 0,
+          left: 0,
+          child: SafeArea(
+            bottom: false,
+            child: IgnorePointer(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(20, 12, 0, 0),
+                child: Text(s.name,
+                    style: kaiStyle.copyWith(fontSize: 13, color: p.faint)),
+              ),
             ),
           ),
         ),
-        _Pager(st: st, p: p),
+        Positioned(
+          top: 0,
+          right: 0,
+          child: SafeArea(
+            bottom: false,
+            child: IconButton(
+              tooltip: '退出全屏',
+              icon: Icon(Icons.fullscreen_exit, size: 22, color: p.soft),
+              color: p.paper.withOpacity(0.85),
+              highlightColor: p.chip,
+              onPressed: () => st.setFullScreen(false),
+            ),
+          ),
+        ),
       ],
+    );
+  }
+
+  /// 一次遍历建立「段落 → 标注」索引，避免每段都全量过滤标注列表。
+  Map<int, List<Annotation>> _marksByPara(AppState st, String key) {
+    final map = <int, List<Annotation>>{};
+    for (final a in st.annotations) {
+      if (a.sutraKey == key) {
+        map.putIfAbsent(a.para, () => <Annotation>[]).add(a);
+      }
+    }
+    return map;
+  }
+
+  Widget _paraRow(Sutra s, AppState st, int i,
+      Map<int, List<Annotation>> marks) {
+    final para = s.text.paras[i];
+    if (para.isPreface && !st.showPreface) return const SizedBox.shrink();
+    return Container(
+      key: _keyFor(i),
+      margin: EdgeInsets.only(bottom: para.k == 'p' ? 13 : 9),
+      child: AnnotatedParagraph(
+        text: para.v,
+        kind: para.k,
+        fontSize: st.fontSize,
+        palette: Palette.of(st.night),
+        marks: marks[i] ?? const <Annotation>[],
+        onSelection: (sel) => _onSelection(i, sel),
+        onAnnotate: (sel) => _annotate(s, Palette.of(st.night),
+            paraIndex: i, selection: sel),
+        onTapMarks: (marks) => _tapMarks(marks, Palette.of(st.night)),
+      ),
     );
   }
 
@@ -219,11 +321,13 @@ class _ReaderPageState extends State<ReaderPage> {
         selectedLen: _selectedLen,
         onAnnotate: () => _annotate(s, p),
         onCopy: () => _copyVolume(s),
+        onFullScreen: () => st.enterFullScreen(),
       ));
       head.add(const SizedBox(height: 8));
     }
 
     final paras = s.text.paras;
+    final marks = _marksByPara(st, s.key);
     return <Widget>[
       SliverPadding(
         padding: const EdgeInsets.fromLTRB(24, 20, 24, 0),
@@ -234,27 +338,7 @@ class _ReaderPageState extends State<ReaderPage> {
           padding: const EdgeInsets.fromLTRB(24, 0, 24, 96),
           sliver: SliverList(
             delegate: SliverChildBuilderDelegate(
-              (context, i) {
-                final para = paras[i];
-                if (para.isPreface && !st.showPreface) {
-                  return const SizedBox.shrink();
-                }
-                return Container(
-                  key: _keyFor(i),
-                  margin: EdgeInsets.only(bottom: para.k == 'p' ? 13 : 9),
-                  child: AnnotatedParagraph(
-                    text: para.v,
-                    kind: para.k,
-                    fontSize: st.fontSize,
-                    palette: p,
-                    marks: st.marksFor(s.key, i),
-                    onSelection: (sel) => _onSelection(i, sel),
-                    onAnnotate: (sel) =>
-                        _annotate(s, p, paraIndex: i, selection: sel),
-                    onTapMarks: (marks) => _tapMarks(marks, p),
-                  ),
-                );
-              },
+              (context, i) => _paraRow(s, st, i, marks),
               childCount: paras.length,
             ),
           ),
@@ -781,6 +865,7 @@ class _TextTools extends StatelessWidget {
   final ValueListenable<int> selectedLen;
   final VoidCallback onAnnotate;
   final VoidCallback onCopy;
+  final VoidCallback onFullScreen;
 
   const _TextTools({
     required this.st,
@@ -790,6 +875,7 @@ class _TextTools extends StatelessWidget {
     required this.selectedLen,
     required this.onAnnotate,
     required this.onCopy,
+    required this.onFullScreen,
   });
 
   @override
@@ -809,6 +895,7 @@ class _TextTools extends StatelessWidget {
               label: '卷首序跋${preface > 0 ? ' ($preface)' : ''}',
               p: p, active: st.showPreface, onTap: () => st.setShowPreface(!st.showPreface)),
           _MiniButton(label: '复制本卷', p: p, onTap: onCopy),
+          _MiniButton(label: '⛶ 全屏阅读', p: p, onTap: onFullScreen),
           ValueListenableBuilder<int>(
             valueListenable: selectedLen,
             builder: (context, len, _) => _MiniButton(
@@ -853,7 +940,11 @@ class AnnotatedParagraph extends StatefulWidget {
   State<AnnotatedParagraph> createState() => _AnnotatedParagraphState();
 }
 
-class _AnnotatedParagraphState extends State<AnnotatedParagraph> {
+class _AnnotatedParagraphState extends State<AnnotatedParagraph>
+    with AutomaticKeepAliveClientMixin<AnnotatedParagraph> {
+  @override
+  bool get wantKeepAlive => true;
+
   final List<TapGestureRecognizer> _recognizers = <TapGestureRecognizer>[];
 
   // 缓存已构建的富文本与手势识别器：滚动导致的重建直接复用，
@@ -956,6 +1047,7 @@ class _AnnotatedParagraphState extends State<AnnotatedParagraph> {
 
   @override
   Widget build(BuildContext context) {
+    super.build(context); // AutomaticKeepAliveClientMixin 要求调用
     final p = widget.palette;
     final style = _baseStyle(p);
     final span = _ensureSpan();
